@@ -60,6 +60,7 @@ if uploaded_file is not None:
         writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
         tracker = sv.ByteTrack()
+        unique_counts = {}  # stores unique tracker IDs seen per class
         box_annotator = sv.BoxAnnotator()
         label_annotator = sv.LabelAnnotator()
 
@@ -79,10 +80,14 @@ if uploaded_file is not None:
             detections = sv.Detections.from_ultralytics(results)
             detections = tracker.update_with_detections(detections)
 
-            labels = [
-                f"#{tracker_id} {all_classes.get(class_id, 'obj')}"
-                for class_id, tracker_id in zip(detections.class_id, detections.tracker_id)
-            ]
+            labels = []
+            for class_id, tracker_id in zip(detections.class_id, detections.tracker_id):
+                class_name = all_classes.get(class_id, "obj")
+                labels.append(f"#{tracker_id} {class_name}")
+
+                if class_name not in unique_counts:
+                    unique_counts[class_name] = set()
+                unique_counts[class_name] = unique_counts[class_name] | {tracker_id}
 
             annotated = box_annotator.annotate(scene=frame.copy(), detections=detections)
             annotated = label_annotator.annotate(scene=annotated, detections=detections, labels=labels)
@@ -102,10 +107,24 @@ if uploaded_file is not None:
 
         cap.release()
         writer.release()
+        unique_counts = {label: len(ids) for label, ids in unique_counts.items()}
         progress_bar.progress(1.0, text="Done!")
 
         st.success("✅ Processing complete!")
-        st.video(output_path)
+
+        # Show video at a controlled size instead of full width
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.video(output_path)
+
+        # ---------- SUMMARY OF TRACKED OBJECTS ----------
+        st.subheader("📊 Tracking Summary")
+        if unique_counts:
+            summary_cols = st.columns(len(unique_counts))
+            for i, (label, count) in enumerate(unique_counts.items()):
+                summary_cols[i].metric(label.capitalize() + "s", count)
+        else:
+            st.write("No objects detected.")
 
         with open(output_path, "rb") as f:
             st.download_button("⬇️ Download annotated video", f, file_name="tracked_output.mp4")
