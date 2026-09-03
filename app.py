@@ -9,7 +9,6 @@ import supervision as sv
 # ---------- PAGE SETUP & CUSTOM UI ----------
 st.set_page_config(page_title="Vision MOT Dashboard", layout="wide", page_icon="👁️")
 
-# Inject Custom CSS for a modern aesthetic AND video size constraints
 st.markdown("""
 <style>
     .stApp { font-family: 'Space Grotesk', sans-serif; }
@@ -28,7 +27,6 @@ st.markdown("""
     .stProgress > div > div > div > div { background-color: #f2a65a; }
     div[data-testid="stMetricValue"] { color: #f2a65a; font-family: 'IBM Plex Mono', monospace; }
     
-    /* FIX VIDEO SIZE: Constrain to 60% of the screen height to prevent scrolling */
     [data-testid="stVideo"] {
         display: flex;
         justify-content: center;
@@ -46,7 +44,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<p class="main-header">Vision MOT Dashboard</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Fast Backend Object Tracking Engine</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Ultra-Fast Backend CPU Tracking Engine</p>', unsafe_allow_html=True)
 
 # ---------- LOAD MODEL ----------
 @st.cache_resource
@@ -74,10 +72,9 @@ with col_controls:
     st.divider()
     st.subheader("📁 Input Source")
     uploaded_file = st.file_uploader("Drop a video file here", type=["mp4", "avi", "mov"], label_visibility="collapsed")
-    start_btn = st.button("▶️ Process Video")
+    start_btn = st.button("▶️ Process Video Fast")
 
 with col_stage:
-    # Placeholders for dynamic UI updates
     stage_header = st.empty()
     status_text = st.empty()
     progress_bar = st.empty()
@@ -86,7 +83,7 @@ with col_stage:
     
     if not uploaded_file:
         stage_header.subheader("Stage: Standby")
-        status_text.info("Upload a video and click Process to begin backend tracking.")
+        status_text.info("Upload a video and click Process.")
 
 # ---------- PROCESSING LOGIC ----------
 if uploaded_file is not None and start_btn:
@@ -96,20 +93,23 @@ if uploaded_file is not None and start_btn:
     input_path = input_temp.name
 
     cap = cv2.VideoCapture(input_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    original_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Downscale resolution to speed up backend CPU inference
+    # 1. OPTIMIZATION: Display Downscale
     max_width = 480
     if width > max_width:
         scale = max_width / width
         width, height = int(width * scale), int(height * scale)
 
+    # 2. OPTIMIZATION: Temporal Downscale (Process at half FPS)
+    target_fps = original_fps / 2.0
+
     output_path = os.path.join(tempfile.gettempdir(), "raw_output.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    writer = cv2.VideoWriter(output_path, fourcc, target_fps, (width, height))
 
     tracker = sv.ByteTrack()
     box_annotator = sv.BoxAnnotator(thickness=2)
@@ -117,21 +117,30 @@ if uploaded_file is not None and start_btn:
     
     unique_counts = {}  
 
-    # Update UI to active processing state
-    stage_header.subheader("⚙️ Processing Video in Backend...")
-    status_text.info("Analyzing frames. The final high-speed video will appear here when finished.")
+    stage_header.subheader("⚡ Processing Video at High Speed...")
+    status_text.info("Running optimizations: Frame skipping + 320px inference tensor.")
     prog_bar = progress_bar.progress(0)
 
     frame_idx = 0
+    frames_processed = 0
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
+        frame_idx += 1
+        
+        # Skip every other frame (cuts workload by 50%)
+        if frame_idx % 2 != 0:
+            continue
+            
+        frames_processed += 1
         frame = cv2.resize(frame, (width, height))
 
-        # Run fast background inference
-        results = model(frame, conf=conf_threshold, iou=iou_threshold, classes=selected_class_ids, verbose=False)[0]
+        # 3. OPTIMIZATION: Inference Downscale (imgsz=320 cuts CPU math by 75%)
+        results = model(frame, conf=conf_threshold, iou=iou_threshold, classes=selected_class_ids, imgsz=320, verbose=False)[0]
+        
         detections = sv.Detections.from_ultralytics(results)
         detections = tracker.update_with_detections(detections)
 
@@ -139,7 +148,6 @@ if uploaded_file is not None and start_btn:
         for class_id, tracker_id in zip(detections.class_id, detections.tracker_id):
             class_name = all_classes.get(class_id, "obj")
             labels.append(f"#{tracker_id} {class_name}")
-
             if class_name not in unique_counts:
                 unique_counts[class_name] = set()
             unique_counts[class_name].add(tracker_id)
@@ -149,23 +157,23 @@ if uploaded_file is not None and start_btn:
 
         writer.write(annotated)
 
-        frame_idx += 1
-        # Update progress bar smoothly
-        if total_frames > 0 and frame_idx % 5 == 0:
+        # Update progress bar smoothly based on total frames
+        if total_frames > 0 and frame_idx % 10 == 0:
             prog_bar.progress(min(frame_idx / total_frames, 1.0))
 
     cap.release()
     writer.release()
     
-    # ----- FFMPEG CONVERSION FOR SMOOTH WEB PLAYBACK -----
+    # ----- 4. OPTIMIZATION: FFMPEG Ultrafast Preset -----
     stage_header.subheader("Finalizing Video...")
-    status_text.info("Converting video format for flawless browser playback...")
+    status_text.info("Running ultrafast H.264 compression...")
     prog_bar.progress(1.0)
     
     h264_output_path = os.path.join(tempfile.gettempdir(), "h264_output.mp4")
     
     try:
-        subprocess.run(["ffmpeg", "-y", "-i", output_path, "-vcodec", "libx264", h264_output_path], 
+        # Added -preset ultrafast to encode the video almost instantly
+        subprocess.run(["ffmpeg", "-y", "-i", output_path, "-vcodec", "libx264", "-preset", "ultrafast", "-crf", "28", h264_output_path], 
                        check=True, capture_output=True, text=True)
         final_video_path = h264_output_path
     except Exception as e:
@@ -174,16 +182,13 @@ if uploaded_file is not None and start_btn:
 
     unique_counts = {label: len(ids) for label, ids in unique_counts.items()}
     
-    # Clean up UI
     stage_header.subheader("✅ Tracking Complete")
     status_text.empty()
     prog_bar.empty() 
     
-    # Show smooth 30FPS video perfectly sized to the screen
     with video_placeholder.container():
         st.video(final_video_path)
     
-    # Display final metrics
     with stats_placeholder.container():
         st.divider()
         st.subheader("📊 Lifetime Object Counts (Unique IDs)")
