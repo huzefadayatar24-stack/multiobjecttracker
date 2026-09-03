@@ -4,11 +4,12 @@ import tempfile
 import os
 import subprocess
 import numpy as np
-from PIL import Image
 from ultralytics import YOLO
 import supervision as sv
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import av
 
-# ---------- PAGE SETUP & MODERN UI ----------
+# ---------- PAGE SETUP & STYLING ----------
 st.set_page_config(page_title="Vision MOT Dashboard", layout="wide", page_icon="🎯")
 
 st.markdown("""
@@ -17,36 +18,19 @@ st.markdown("""
     .main-header { font-size: 2.2rem; font-weight: 700; color: #f2a65a; margin-bottom: 0px; }
     .sub-header { color: #8b96a3; font-size: 1.05rem; margin-bottom: 1.5rem; }
     .stButton>button { 
-        width: 100%; 
-        border-radius: 8px; 
-        font-weight: 600; 
-        background-color: #f2a65a; 
-        color: #12171d; 
-        border: none;
-        transition: all 0.2s ease-in-out;
+        width: 100%; border-radius: 8px; font-weight: 600; 
+        background-color: #f2a65a; color: #12171d; border: none;
     }
     .stButton>button:hover { background-color: #f5b675; }
     .stProgress > div > div > div > div { background-color: #f2a65a; }
     div[data-testid="stMetricValue"] { color: #f2a65a; font-family: 'IBM Plex Mono', monospace; }
     
-    [data-testid="stVideo"] {
-        display: flex;
-        justify-content: center;
-        background-color: #0b0e12;
-        border-radius: 8px;
-        padding: 8px;
-    }
-    [data-testid="stVideo"] video {
-        max-height: 60vh; 
-        width: auto !important; 
-        max-width: 100%;
-        border-radius: 6px;
-    }
+    [data-testid="stVideo"] video { max-height: 60vh; width: auto !important; max-width: 100%; border-radius: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<p class="main-header">Vision MOT & Live Detection Engine</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Multi-Object Tracking & Real-Time Camera Inference</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-header">Vision MOT Dashboard</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">True Live WebRTC Camera & Video Tracker</p>', unsafe_allow_html=True)
 
 # ---------- LOAD MODEL ----------
 @st.cache_resource
@@ -56,12 +40,17 @@ def load_model():
 model = load_model()
 all_classes = {0: "person", 2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
+# WebRTC Configuration for Live Streaming
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
 # ---------- CONTROLS & LAYOUT ----------
 col_controls, col_stage = st.columns([1, 2.5], gap="large")
 
 with col_controls:
     st.subheader("⚙️ Settings")
-    input_mode = st.radio("Select Input Mode", ["📁 Upload Video", "📷 Live Camera"], index=0)
+    input_mode = st.radio("Select Input Mode", ["📷 Live WebRTC Camera", "📁 Upload Video"], index=0)
     
     conf_threshold = st.slider("Confidence Threshold", 0.10, 0.90, 0.30, 0.05)
     iou_threshold = st.slider("IoU Threshold", 0.20, 0.80, 0.50, 0.05)
@@ -74,63 +63,58 @@ with col_controls:
     selected_class_ids = [k for k, v in all_classes.items() if v in selected_labels]
 
     st.divider()
-    
     uploaded_file = None
-    camera_image = None
     
     if input_mode == "📁 Upload Video":
         uploaded_file = st.file_uploader("Upload video file", type=["mp4", "avi", "mov"])
         start_btn = st.button("▶️ Process Video Tracking")
-    else:
-        st.info("Click 'Take Photo' below to run live detection through your camera.")
-        camera_image = st.camera_input("Camera Viewfinder")
 
 with col_stage:
+    
     # -------------------------------------------------------------
-    # MODE 1: LIVE CAMERA CAPTURE
+    # MODE 1: TRUE LIVE WEBRTC STREAMING
     # -------------------------------------------------------------
-    if input_mode == "📷 Live Camera":
-        st.subheader("📷 Live Camera Detection")
+    if input_mode == "📷 Live WebRTC Camera":
+        st.subheader("🔴 Live Camera Feed")
+        st.info("Click 'START' below and allow browser camera permissions to begin live tracking.")
         
-        if camera_image is not None:
-            # Convert the camera bytes to an OpenCV image
-            bytes_data = camera_image.getvalue()
-            cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+        # Initialize a tracker specifically for the live feed
+        webrtc_tracker = sv.ByteTrack(track_activation_threshold=conf_threshold)
+        box_annotator = sv.BoxAnnotator(thickness=2)
+        label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
+
+        # This callback runs automatically on every single frame the webcam sends
+        def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+            img = frame.to_ndarray(format="bgr24")
             
-            # Run YOLO inference
-            results = model(cv2_img, conf=conf_threshold, iou=iou_threshold, classes=selected_class_ids, verbose=False)[0]
+            # Run YOLO on the live frame
+            results = model(img, conf=conf_threshold, iou=iou_threshold, classes=selected_class_ids, verbose=False)[0]
             detections = sv.Detections.from_ultralytics(results)
+            detections = webrtc_tracker.update_with_detections(detections)
             
-            box_annotator = sv.BoxAnnotator(thickness=2)
-            label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
-            
-            labels = [f"{all_classes.get(cid, 'obj')} {conf:0.2f}" for cid, conf in zip(detections.class_id, detections.confidence)]
-            
-            annotated = box_annotator.annotate(scene=cv2_img.copy(), detections=detections)
+            labels = []
+            for class_id, tracker_id in zip(detections.class_id, detections.tracker_id):
+                class_name = all_classes.get(class_id, "obj")
+                labels.append(f"#{tracker_id} {class_name}")
+
+            # Draw boxes
+            annotated = box_annotator.annotate(scene=img.copy(), detections=detections)
             annotated = label_annotator.annotate(scene=annotated, detections=detections, labels=labels)
             
-            # Display the annotated frame
-            st.image(annotated, channels="BGR", use_container_width=True)
-            
-            # Display stats
-            st.divider()
-            st.subheader("📊 Detected Objects")
-            counts = {}
-            for cid in detections.class_id:
-                name = all_classes.get(cid, "obj")
-                counts[name] = counts.get(name, 0) + 1
-                
-            if counts:
-                cols = st.columns(len(counts))
-                for idx, (label, count) in enumerate(counts.items()):
-                    cols[idx].metric(label.capitalize() + "s", count)
-            else:
-                st.info("No objects detected above the selected confidence threshold.")
-        else:
-            st.info("Awaiting camera input. Allow browser camera permissions if prompted.")
+            return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
+        # The actual WebRTC streaming component
+        webrtc_streamer(
+            key="yolo-live-stream",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=RTC_CONFIGURATION,
+            media_stream_constraints={"video": True, "audio": False},
+            video_frame_callback=video_frame_callback,
+            async_processing=True
+        )
 
     # -------------------------------------------------------------
-    # MODE 2: VIDEO PROCESSING & TRACKING
+    # MODE 2: HIGH QUALITY VIDEO UPLOAD
     # -------------------------------------------------------------
     elif input_mode == "📁 Upload Video":
         stage_header = st.empty()
