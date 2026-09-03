@@ -107,15 +107,21 @@ if uploaded_file is not None:
 
         cap.release()
         writer.release()
-        unique_counts = {label: len(ids) for label, ids in unique_counts.items()}
-        progress_bar.progress(1.0, text="Done!")
+        
+        # ---------------------------------------------------------
+        # NEW FFMPEG STEP: Convert to H.264 for the web browser
+        # ---------------------------------------------------------
+        progress_bar.progress(1.0, text="Finalizing video format for browser...")
+        h264_output_path = os.path.join(tempfile.gettempdir(), "h264_output.mp4")
+        os.system(f"ffmpeg -y -i {output_path} -vcodec libx264 {h264_output_path}")
 
+        unique_counts = {label: len(ids) for label, ids in unique_counts.items()}
         st.success("✅ Processing complete!")
 
         # Show video at a controlled size instead of full width
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.video(output_path)
+            st.video(h264_output_path) # Now using the converted H.264 video
 
         # ---------- SUMMARY OF TRACKED OBJECTS ----------
         st.subheader("📊 Tracking Summary")
@@ -126,5 +132,5 @@ if uploaded_file is not None:
         else:
             st.write("No objects detected.")
 
-        with open(output_path, "rb") as f:
+        with open(h264_output_path, "rb") as f:
             st.download_button("⬇️ Download annotated video", f, file_name="tracked_output.mp4")
