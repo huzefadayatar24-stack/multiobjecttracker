@@ -5,6 +5,7 @@ import os
 import subprocess
 from ultralytics import YOLO
 import supervision as sv
+import imageio_ffmpeg # <-- NEW IMPORT
 
 # ---------- PAGE SETUP & STYLING ----------
 st.set_page_config(page_title="High-Fidelity MOT Dashboard", layout="wide", page_icon="🎯")
@@ -52,7 +53,6 @@ col_controls, col_stage = st.columns([1, 2.5], gap="large")
 with col_controls:
     st.subheader("⚙️ Model Configuration")
     
-    # Model Selector: Nano for testing, Small for full accuracy
     model_choice = st.selectbox(
         "Detection Model",
         options=["yolov8s.pt (Recommended - High Accuracy)", "yolov8n.pt (Faster - Lower Precision)"],
@@ -69,9 +69,7 @@ with col_controls:
     st.divider()
     st.subheader("🎯 Tracking Parameters")
     
-    # Optimal detection threshold for ByteTrack: 0.20 - 0.25
-    conf_threshold = st.slider("Detection Confidence", 0.10, 0.90, 0.25, 0.05,
-                               help="Lower values allow ByteTrack to detect distant and partially occluded objects.")
+    conf_threshold = st.slider("Detection Confidence", 0.10, 0.90, 0.25, 0.05)
     iou_threshold = st.slider("NMS IoU Threshold", 0.20, 0.80, 0.50, 0.05)
     
     all_classes = {0: "person", 2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
@@ -111,19 +109,16 @@ if uploaded_file is not None and start_btn:
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Keep native resolution to preserve every pixel for distant objects
     output_path = os.path.join(tempfile.gettempdir(), "raw_hd_output.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-    # Tuned ByteTrack configuration
     tracker = sv.ByteTrack(
         track_activation_threshold=conf_threshold,
-        lost_track_buffer=45,         # Keep track ID alive for 45 frames during occlusions
+        lost_track_buffer=45,
         minimum_matching_threshold=0.8
     )
     
-    # Clean, professional annotation styling
     box_annotator = sv.BoxAnnotator(thickness=2)
     label_annotator = sv.LabelAnnotator(
         text_scale=0.45, 
@@ -143,7 +138,6 @@ if uploaded_file is not None and start_btn:
         if not ret:
             break
 
-        # Run inference at 640px native letterbox without squashing aspect ratio
         results = model(
             frame, 
             conf=conf_threshold, 
@@ -165,7 +159,6 @@ if uploaded_file is not None and start_btn:
                 unique_counts[class_name] = set()
             unique_counts[class_name].add(tracker_id)
 
-        # Render annotations directly onto original resolution frame
         annotated = box_annotator.annotate(scene=frame.copy(), detections=detections)
         annotated = label_annotator.annotate(scene=annotated, detections=detections, labels=labels)
 
@@ -178,7 +171,7 @@ if uploaded_file is not None and start_btn:
     cap.release()
     writer.release()
     
-    # ---------- LOSSLESS WEB CONVERSION ----------
+    # ---------- LOSSLESS WEB CONVERSION (PYTHON FFMPEG) ----------
     stage_header.subheader("Encoding High-Quality Video...")
     status_text.info("Applying H.264 high-profile encoding...")
     prog_bar.progress(1.0)
@@ -186,9 +179,11 @@ if uploaded_file is not None and start_btn:
     h264_output_path = os.path.join(tempfile.gettempdir(), "h264_hd_output.mp4")
     
     try:
-        # CRF 18 = Visually lossless, preset medium = crisp edges and text
+        # <-- NEW: Get the path to the Python-installed FFmpeg binary -->
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        
         subprocess.run([
-            "ffmpeg", "-y", "-i", output_path,
+            ffmpeg_path, "-y", "-i", output_path,
             "-vcodec", "libx264",
             "-crf", "18",
             "-preset", "medium",
