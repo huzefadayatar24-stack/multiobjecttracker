@@ -5,7 +5,7 @@ import os
 import subprocess
 from ultralytics import YOLO
 import supervision as sv
-import imageio_ffmpeg # <-- NEW IMPORT
+import imageio_ffmpeg
 
 # ---------- PAGE SETUP & STYLING ----------
 st.set_page_config(page_title="High-Fidelity MOT Dashboard", layout="wide", page_icon="🎯")
@@ -37,7 +37,7 @@ st.markdown("""
     }
     [data-testid="stVideo"] video {
         max-height: 65vh; 
-        width: auto !important; 
+        width: 100% !important; 
         max-width: 100%;
         border-radius: 6px;
     }
@@ -171,22 +171,22 @@ if uploaded_file is not None and start_btn:
     cap.release()
     writer.release()
     
-    # ---------- LOSSLESS WEB CONVERSION (PYTHON FFMPEG) ----------
-    stage_header.subheader("Encoding High-Quality Video...")
-    status_text.info("Applying H.264 high-profile encoding...")
+    # ---------- FAST WEB STREAMING CONVERSION ----------
+    stage_header.subheader("Encoding Streamable Video...")
+    status_text.info("Finalizing web streaming format...")
     prog_bar.progress(1.0)
     
     h264_output_path = os.path.join(tempfile.gettempdir(), "h264_hd_output.mp4")
     
     try:
-        # <-- NEW: Get the path to the Python-installed FFmpeg binary -->
         ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
         
         subprocess.run([
             ffmpeg_path, "-y", "-i", output_path,
             "-vcodec", "libx264",
-            "-crf", "18",
-            "-preset", "medium",
+            "-crf", "24",
+            "-preset", "veryfast",
+            "-movflags", "+faststart",
             "-pix_fmt", "yuv420p",
             h264_output_path
         ], check=True, capture_output=True, text=True)
@@ -197,13 +197,15 @@ if uploaded_file is not None and start_btn:
 
     unique_counts = {label: len(ids) for label, ids in unique_counts.items()}
     
-    # UI Reset & Display
+    # UI Reset & Immediate Playback
     stage_header.subheader("✅ High-Fidelity Tracking Complete")
     status_text.empty()
     prog_bar.empty()
     
     with video_placeholder.container():
-        st.video(final_video_path)
+        with open(final_video_path, "rb") as video_file:
+            video_bytes = video_file.read()
+            st.video(video_bytes, format="video/mp4")
     
     with stats_placeholder.container():
         st.divider()
