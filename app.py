@@ -1,228 +1,134 @@
 import streamlit as st
 import cv2
+import numpy as np
 import tempfile
 import os
-import subprocess
+import imageio
 from ultralytics import YOLO
 import supervision as sv
-import imageio_ffmpeg
 
-# ---------- PAGE SETUP & STYLING ----------
-st.set_page_config(page_title="High-Fidelity MOT Dashboard", layout="wide", page_icon="🎯")
+# ---------- PAGE SETUP ----------
+st.set_page_config(page_title="Real-Time MOT (YOLOv8 + ByteTrack)", layout="wide")
+st.title("🚦 Real-Time Multi-Object Tracking")
+st.write("Upload a video. The app will detect and track objects (Person, Car, Bus, Truck) and give you a smooth, downloadable annotated video.")
 
-st.markdown("""
-<style>
-    .stApp { font-family: 'Space Grotesk', sans-serif; }
-    .main-header { font-size: 2.2rem; font-weight: 700; color: #f2a65a; margin-bottom: 0px; }
-    .sub-header { color: #8b96a3; font-size: 1.05rem; margin-bottom: 1.5rem; }
-    .stButton>button { 
-        width: 100%; 
-        border-radius: 8px; 
-        font-weight: 600; 
-        background-color: #f2a65a; 
-        color: #12171d; 
-        border: none;
-        transition: all 0.2s ease-in-out;
-    }
-    .stButton>button:hover { background-color: #f5b675; }
-    .stProgress > div > div > div > div { background-color: #f2a65a; }
-    div[data-testid="stMetricValue"] { color: #f2a65a; font-family: 'IBM Plex Mono', monospace; }
-    
-    [data-testid="stVideo"] {
-        display: flex;
-        justify-content: center;
-        background-color: #0b0e12;
-        border-radius: 8px;
-        padding: 8px;
-    }
-    [data-testid="stVideo"] video {
-        max-height: 65vh; 
-        width: 100% !important; 
-        max-width: 100%;
-        border-radius: 6px;
-    }
-</style>
-""", unsafe_allow_html=True)
+# ---------- LOAD MODEL (cached so it only loads once) ----------
+@st.cache_resource
+def load_model():
+    return YOLO("yolov8n.pt")  # nano model = fastest, best for free CPU servers
 
-st.markdown('<p class="main-header">High-Fidelity Object Tracker</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Full Precision Detection & Persistent Association Engine</p>', unsafe_allow_html=True)
+model = load_model()
 
-# ---------- SIDEBAR & CONTROLS ----------
-col_controls, col_stage = st.columns([1, 2.5], gap="large")
+# ---------- SIDEBAR SETTINGS ----------
+st.sidebar.header("Settings")
+conf_threshold = st.sidebar.slider("Confidence threshold", 0.1, 1.0, 0.3, 0.05)
+iou_threshold = st.sidebar.slider("IoU threshold", 0.1, 1.0, 0.5, 0.05)
 
-with col_controls:
-    st.subheader("⚙️ Model Configuration")
-    
-    model_choice = st.selectbox(
-        "Detection Model",
-        options=["yolov8s.pt (Recommended - High Accuracy)", "yolov8n.pt (Faster - Lower Precision)"],
-        index=0
-    )
-    selected_model_path = "yolov8s.pt" if "yolov8s" in model_choice else "yolov8n.pt"
+all_classes = {0: "person", 2: "car", 5: "bus", 7: "truck"}
+selected_labels = st.sidebar.multiselect(
+    "Classes to track",
+    options=list(all_classes.values()),
+    default=list(all_classes.values())
+)
+selected_class_ids = [k for k, v in all_classes.items() if v in selected_labels]
 
-    @st.cache_resource
-    def get_model(path):
-        return YOLO(path)
-    
-    model = get_model(selected_model_path)
-    
-    st.divider()
-    st.subheader("🎯 Tracking Parameters")
-    
-    conf_threshold = st.slider("Detection Confidence", 0.10, 0.90, 0.25, 0.05)
-    iou_threshold = st.slider("NMS IoU Threshold", 0.20, 0.80, 0.50, 0.05)
-    
-    all_classes = {0: "person", 2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
-    selected_labels = st.multiselect(
-        "Classes to Track",
-        options=list(all_classes.values()),
-        default=list(all_classes.values())
-    )
-    selected_class_ids = [k for k, v in all_classes.items() if v in selected_labels]
+# ---------- FILE UPLOAD ----------
+uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
 
-    st.divider()
-    st.subheader("📁 Input Video")
-    uploaded_file = st.file_uploader("Upload video file", type=["mp4", "avi", "mov"], label_visibility="collapsed")
-    start_btn = st.button("▶️ Run High-Quality Tracking")
+if uploaded_file is not None:
 
-with col_stage:
-    stage_header = st.empty()
-    status_text = st.empty()
-    progress_bar = st.empty()
-    video_placeholder = st.empty()
-    stats_placeholder = st.empty()
-    
-    if not uploaded_file:
-        stage_header.subheader("Stage: Standby")
-        status_text.info("Upload a video and select your desired model to begin.")
-
-# ---------- PROCESSING PIPELINE ----------
-if uploaded_file is not None and start_btn:
-    
     input_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     input_temp.write(uploaded_file.read())
     input_path = input_temp.name
 
-    cap = cv2.VideoCapture(input_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if st.button("▶️ Start Processing"):
 
-    output_path = os.path.join(tempfile.gettempdir(), "raw_hd_output.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        cap = cv2.VideoCapture(input_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    tracker = sv.ByteTrack(
-        track_activation_threshold=conf_threshold,
-        lost_track_buffer=45,
-        minimum_matching_threshold=0.8
-    )
-    
-    box_annotator = sv.BoxAnnotator(thickness=2)
-    label_annotator = sv.LabelAnnotator(
-        text_scale=0.45, 
-        text_thickness=1, 
-        text_padding=4
-    )
-    
-    unique_counts = {}
+        # Downscale large videos so free CPU server can keep up during processing
+        max_width = 640
+        if width > max_width:
+            scale = max_width / width
+            width, height = int(width * scale), int(height * scale)
 
-    stage_header.subheader(f"⚙️ Tracking Active ({selected_model_path})")
-    status_text.info("Analyzing full-resolution frames. Maintaining spatial & temporal consistency...")
-    prog_bar = progress_bar.progress(0)
+        output_path = os.path.join(tempfile.gettempdir(), "output.mp4")
 
-    frame_idx = 0
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # ---- KEY FIX: proper H.264 encoder for smooth browser playback ----
+        writer = imageio.get_writer(
+            output_path,
+            fps=fps,
+            codec="libx264",
+            quality=8,
+            ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+        )
 
-        results = model(
-            frame, 
-            conf=conf_threshold, 
-            iou=iou_threshold, 
-            classes=selected_class_ids, 
-            imgsz=640, 
-            verbose=False
-        )[0]
-        
-        detections = sv.Detections.from_ultralytics(results)
-        detections = tracker.update_with_detections(detections)
+        tracker = sv.ByteTrack()
+        unique_counts = {}
+        box_annotator = sv.BoxAnnotator()
+        label_annotator = sv.LabelAnnotator()
 
-        labels = []
-        for class_id, tracker_id in zip(detections.class_id, detections.tracker_id):
-            class_name = all_classes.get(class_id, "obj")
-            labels.append(f"#{tracker_id} {class_name}")
+        progress_bar = st.progress(0, text="Processing video... please wait")
+        preview_placeholder = st.empty()
 
-            if class_name not in unique_counts:
-                unique_counts[class_name] = set()
-            unique_counts[class_name].add(tracker_id)
+        frame_idx = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        annotated = box_annotator.annotate(scene=frame.copy(), detections=detections)
-        annotated = label_annotator.annotate(scene=annotated, detections=detections, labels=labels)
+            frame = cv2.resize(frame, (width, height))
 
-        writer.write(annotated)
+            results = model(frame, conf=conf_threshold, iou=iou_threshold,
+                             classes=selected_class_ids, verbose=False)[0]
+            detections = sv.Detections.from_ultralytics(results)
+            detections = tracker.update_with_detections(detections)
 
-        frame_idx += 1
-        if total_frames > 0 and frame_idx % 4 == 0:
-            prog_bar.progress(min(frame_idx / total_frames, 1.0))
+            labels = []
+            for class_id, tracker_id in zip(detections.class_id, detections.tracker_id):
+                class_name = all_classes.get(class_id, "obj")
+                labels.append(f"#{tracker_id} {class_name}")
+                unique_counts.setdefault(class_name, set()).add(tracker_id)
 
-    cap.release()
-    writer.release()
-    
-    # ---------- FAST WEB STREAMING CONVERSION ----------
-    stage_header.subheader("Encoding Streamable Video...")
-    status_text.info("Finalizing web streaming format...")
-    prog_bar.progress(1.0)
-    
-    h264_output_path = os.path.join(tempfile.gettempdir(), "h264_hd_output.mp4")
-    
-    try:
-        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-        
-        subprocess.run([
-            ffmpeg_path, "-y", "-i", output_path,
-            "-vcodec", "libx264",
-            "-crf", "24",
-            "-preset", "veryfast",
-            "-movflags", "+faststart",
-            "-pix_fmt", "yuv420p",
-            h264_output_path
-        ], check=True, capture_output=True, text=True)
-        final_video_path = h264_output_path
-    except Exception as e:
-        final_video_path = output_path
-        st.error(f"FFmpeg conversion fallback engaged: {e}")
+            annotated = box_annotator.annotate(scene=frame.copy(), detections=detections)
+            annotated = label_annotator.annotate(scene=annotated, detections=detections, labels=labels)
 
-    unique_counts = {label: len(ids) for label, ids in unique_counts.items()}
-    
-    # UI Reset & Immediate Playback
-    stage_header.subheader("✅ High-Fidelity Tracking Complete")
-    status_text.empty()
-    prog_bar.empty()
-    
-    with video_placeholder.container():
-        with open(final_video_path, "rb") as video_file:
-            video_bytes = video_file.read()
-            st.video(video_bytes, format="video/mp4")
-    
-    with stats_placeholder.container():
-        st.divider()
-        st.subheader("📊 Lifetime Object Counts (Unique IDs)")
+            # imageio expects RGB, OpenCV frames are BGR — convert before writing
+            writer.append_data(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+
+            # Lightweight progress preview — not every frame, keeps processing fast
+            if frame_idx % 20 == 0:
+                preview_placeholder.image(annotated, channels="BGR",
+                                           caption="Processing preview (updates periodically)",
+                                           use_container_width=True)
+
+            frame_idx += 1
+            if total_frames > 0:
+                progress_bar.progress(min(frame_idx / total_frames, 1.0),
+                                       text=f"Processing frame {frame_idx}/{total_frames}")
+
+        cap.release()
+        writer.close()
+        unique_counts = {label: len(ids) for label, ids in unique_counts.items()}
+        progress_bar.progress(1.0, text="Done!")
+        preview_placeholder.empty()
+
+        st.success("✅ Processing complete — smooth playback below!")
+
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.video(output_path)
+
+        st.subheader("📊 Tracking Summary")
         if unique_counts:
-            metric_cols = st.columns(len(unique_counts))
+            summary_cols = st.columns(len(unique_counts))
             for i, (label, count) in enumerate(unique_counts.items()):
-                metric_cols[i].metric(label.capitalize() + "s", count)
+                summary_cols[i].metric(label.capitalize() + "s", count)
         else:
-            st.info("No tracked objects detected.")
+            st.write("No objects detected.")
 
-    with col_controls:
-        with open(final_video_path, "rb") as f:
-            st.download_button(
-                label="⬇️ Download Full-Quality Video", 
-                data=f, 
-                file_name="tracked_output_hd.mp4",
-                mime="video/mp4",
-                type="primary"
-            )
+        with open(output_path, "rb") as f:
+            st.download_button("⬇️ Download annotated video", f, file_name="tracked_output.mp4")
